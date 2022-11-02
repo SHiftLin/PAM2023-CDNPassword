@@ -7,10 +7,11 @@ import argparse
 import tldextract
 
 from browserController import crawlSingle, ErrorCodes
-from URLToHostingCompany import lookup, getCountryCode
+# from URLToHostingCompany import lookup, getCountryCode
 
 
 CRAWL_RETRY_TIMES = 3
+
 
 def processUrl(url):
     """handles a single url. Separated from worker for better testing experience
@@ -24,46 +25,45 @@ def processUrl(url):
     processStartTime = time.time()
 
     # I should change the structure of result to have three indices
-    result = ['', [[], []]]
-    # ["github.com", [[["password email ", "https://github.com/session", []]],
+    result = ['', [], []]
+    # ["github.com", [["password email ", "https://github.com/session", []]],
     # [1, 1, 2, 0, false, true, 1, ["buttonHTML"]]]]
 
     # if getCountryCode(url) == 'US':
     for i in range(CRAWL_RETRY_TIMES):
         # try adding www. at the last retry
-        if i == CRAWL_RETRY_TIMES - 1 and result[1][0] == ErrorCodes.FAILED_TO_LOAD:
+        if i == CRAWL_RETRY_TIMES - 1 and result[1] == ErrorCodes.FAILED_TO_LOAD:
             url = 'www.' + url
 
         result = crawlSingle(url)
-        # if result[1][0] != ErrorCodes.FAILED_TO_LOAD:
-            # break
-        if not isinstance(result[1][0], int):
+        if not isinstance(result[1], int):
             break
     crawlFinishTime = time.time()
 
-    if isinstance(result[1][0], list):
-        # prevent memory from building up (actually it won't matter I think as
-        # they are just text)
-        lookedUp = {}
-        for entry in result[1][0]:
-            hostingProvider = lookup(entry[1], lookedUp)
-            for i in hostingProvider:
-                entry[2].append(i)
-    hostingProviderLookupFinishTime = time.time()
+    # if isinstance(result[1][0], list):
+    #     # prevent memory from building up (actually it won't matter I think as
+    #     # they are just text)
+    #     lookedUp = {}
+    #     for entry in result[1][0]:
+    #         hostingProvider = lookup(entry[1], lookedUp)
+    #         for i in hostingProvider:
+    #             entry[2].append(i)
+    # hostingProviderLookupFinishTime = time.time()
 
-    if not isinstance(result[1][0], int):
-        result[1][1].append(getCountryCode(url))
-        countryCodeLookupFinishTime = time.time()
+    # if not isinstance(result[1][0], int):
+    #     result[1][1].append(getCountryCode(url))
+    #     countryCodeLookupFinishTime = time.time()
 
-        result[1][1].append(int(crawlFinishTime - processStartTime))
-        result[1][1].append(int(hostingProviderLookupFinishTime - crawlFinishTime))
-        result[1][1].append(int(countryCodeLookupFinishTime - hostingProviderLookupFinishTime))
-
+    #     result[1][1].append(int(crawlFinishTime - processStartTime))
+    #     result[1][1].append(int(hostingProviderLookupFinishTime - crawlFinishTime))
+    #     result[1][1].append(int(countryCodeLookupFinishTime - hostingProviderLookupFinishTime))
 
     # else:
     #     result = [url, [ErrorCodes.OTHER, 'Skipped: not a US site']]
+    result.append(int(crawlFinishTime - processStartTime))
 
     return json.dumps(result)
+
 
 def worker(urlServerAddress):
     """the client that gets url from server and pass the url to processURL
@@ -81,30 +81,21 @@ def worker(urlServerAddress):
             postData['resultData'] = processUrl(url)
             postData['idx'] = idx
 
-def startCrawling(threadCount=None):
+
+def startCrawling():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', type=int, help='port of the server', default=5000)
-    parser.add_argument('-t', type=int, help='number of threads to run', default=-1)
     parser.add_argument('-i', type=str, help='ip of the server', default="localhost")
     args = parser.parse_args()
     port = args.p
     ip = args.i
-    threads = args.t
 
-    if threads > 0:
-        threadCount = threads
+    worker("http://%s:%d" % (ip, port))
 
-    urlServerAddress = 'http://%s:%d' % (ip, port)
-    workers = []
-    for i in range(threadCount):
-        t = threading.Thread(target=worker, args=(urlServerAddress, ), name='worker-%d' % i)
-        workers.append(t)
-        t.start()
-    for i in workers:
-        i.join()
 
 if __name__ == '__main__':
-    # todo: allows debug while not ruining one site's experience: possibily just
+    # todo: allows debug while not ruining one site's experience: possibly just
     # detect if there's command line input
-    startCrawling(2)
+    startCrawling()
+    # print(processUrl("casemine.com"))
     # processUrl('apple.com')

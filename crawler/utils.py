@@ -73,7 +73,8 @@ def userSeeable(el):
     if isStale(el):
         return False
     readOnly = el.get_attribute("readonly")
-    return not readOnly and el.is_displayed()
+    size = el.size
+    return not readOnly and el.is_displayed() and size["height"] > 0 and size["width"] > 0
 
 
 def userChangeable(el):
@@ -149,3 +150,16 @@ translateJS = loadJS("translate.js")
 
 def translatePage(driver):
     runScirptInIsolatedWorld(driver, translateJS, "translate")
+
+def sendKeys(driver, el, keys):
+    # actions = selenium.webdriver.common.action_chains.ActionChains(driver)
+    # actions.move_to_element(el)
+    # actions.click()
+    # actions.perform()
+    # time.sleep(0.3)
+    try:
+        el.send_keys(keys)
+    except:
+        actions = selenium.webdriver.common.action_chains.ActionChains(driver)
+        actions.send_keys(keys)
+        actions.perform()

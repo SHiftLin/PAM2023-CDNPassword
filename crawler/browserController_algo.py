@@ -1,5 +1,4 @@
 import json
-import joblib
 import random
 import requests
 import threading
@@ -25,7 +24,7 @@ PATH_TO_DRIVER = config["chromeDriverPath"]
 
 EMAIL = "awehof111@gmail.com"
 # well, people usually say skeleton key, but this email is "skeleton" enough to me
-SKELETONEMAIL = "john@gmail.com"
+SKELETONEMAIL = "testaccount@gmail.com"
 PASSWORD = "8FQXeIIlTj"
 STTIME = time.time()
 stopFlag = False
@@ -117,7 +116,7 @@ def create_driver(proxy=False):
             )
         except Exception as e:
             pass
-    driver.set_page_load_timeout(60)
+    driver.set_page_load_timeout(30)
 
     # install different javascript
     driver.execute_cdp_cmd(
@@ -137,150 +136,146 @@ def create_driver(proxy=False):
 buttonDetectionScript = loadJS("detectButtons.js")
 getFeaturesScript = loadJS("prelimFilter.js")
 
-# fieldnames = ['tag', 'account', 'email', 'innertextLength',  # 'loc_bottom', 'loc_left', 'loc_right', 'loc_top',
-#               'next', 'oauth', 'password', 'signIn', 'signup', 'visible', 'changeable', 'isSameDomain']
-# tag2num = {'img': 1, 'iframe': 2, 'li': 3, 'button': 4, 'span': 5,
-#            'i': 6, 'input': 7, 'font': 8, 'div': 9, 'a': 10, 'p': 11}
-
-
-# def getFeatures(sample):
-#     features = sample[1]
-#     tag = features["tag"].lower()
-#     if tag in tag2num:
-#         features["tag"] = tag2num[tag]
-#     else:
-#         features["tag"] = 0
-#     row = []
-#     for key in fieldnames:
-#         if type(features[key]) == type(0.2):
-#             row.append(round(features[key], 2))
-#         elif type(features[key]) == type(True):
-#             row.append(int(features[key]))
-#         else:
-#             row.append(features[key])
-#     return row
-
-
-def scoreLogin(f):
-    score = 0
-    # Had to do fraction because this number should only differentiate elements
-    # within the same category 
-    score += f["login"] * 0.1
-    score += f["account"] * 0.01
-    score += f["email"] * 0.01
-
-    if f["innertextLength"] > 5:
-        score = -999
-    if f["visible"]:
-        score += 8
-    if f["tag"].strip() == "iframe":
-        if not f["visible"]:
-            score = -999
-        score += 4
-    if f["hasLink"] or f["changeable"]:
-        score += 2
-        if f["isSameDomain"]:
-            score += 2
-    else:
-        score = -999
-    return score
-
-
-def scoreAccount(f):
-    return f["account"] + f["login"] + f["email"]
-
-
-def scorePassword(f):
-    return f["password"]
-
 
 def detectButtons(driver):
     log("Detecting buttons...")
 
+    buttons = driver.execute_script(buttonDetectionScript, DEBUG)
     samples, dfsSeq = driver.execute_script(getFeaturesScript, DEBUG)
 
+    removeItems = []
+
+    # changed to :4 due to added user entry
+
+    for key in ["email", "user", "password", "submit"]:
+        i = buttons[key]
+        for el in i[:]:
+            if not userSeeable(el):
+                i.remove(el)
+                continue
+            # change label to the element that it's point to
+            if el.tag_name.lower().strip() == "label":
+                removeItems.append(el)
+                label = el
+                try:
+                    if el.get_attribute("for"):
+                        el = driver.find_element_by_id(el.get_attribute("for"))
+                    else:
+                        el = el.find_element_by_css_selector(
+                            'input, button, [role="button"]'
+                        )
+                except selenium.common.exceptions.NoSuchElementException:
+                    pass
+                # if it did not change at all
+                if el == label or not userSeeable(el):
+                    try:
+                        # this has .click(), which might return an error
+                        ActionChains(driver).move_to_element(label).click().perform()
+                        el = driver.switch_to.active_element
+                    except:
+                        pass
+
+                if not driver.execute_script(
+                    "return arguments[0].matches('input:not([type]), input[type=text], input[type=email], input[type=password]')",
+                    el,
+                ):
+                    # if el.tag_name.lower().strip() not in ['input', 'button']:
+                    continue
+
+                if el not in i:
+                    i.append(el)
+
+                # one more item for removal
+                i.append(el)
+
+                removeItems.append(el)
+
+    for i in removeItems:
+        for key in buttons:
+            j = buttons[key]
+            if i in j:
+                j.remove(i)
+
+    # merge email inputs and username inputs. not the best solution, but I think
+    # it'll work for this proj
+    for i in buttons["email"]:
+        i.___wantsEmail = True
+    for i in buttons["user"]:
+        # since __eq__ is set for selenium elements, I can totally use "in"
+        # keyword
+        if i not in buttons["email"]:
+            i.___wantsEmail = False
+            buttons["email"].append(i)
+    buttons["account"] = buttons["email"]
+    del buttons["email"], buttons["user"]
+
+    # post process login elements and sort it based on the score given by judge
+    # (higher = better)
     currUrl = driver.current_url
 
-    classNames = {}
+    def judge(el):
+        score = 0
+        if isStale(el):
+            return -999
+            # score = -999
+        if userSeeable(el):
+            score += 8
+        if el.tag_name.lower().strip() == "iframe":
+            if score == 0:
+                score = -999
+            score += 4
+        url = el.get_attribute("href") or el.get_attribute("src")
+        if (
+            url
+            and not url.startswith("javascript:")
+            and currUrl.split("#")[0] != url.split("#")[0]
+        ):
+            if isSameDomain(currUrl, url):
+                score += 2
+        elif not userChangeable(el):
+            score = -999
+        else:
+            score += 2
+        if DEBUG and score < 0:
+            driver.execute_script('arguments[0].style.background = "gray";', el)
+        return score
 
-    for sample in samples:
-        className = sample[1]["className"]
-        if len(list(filter(None, className.split(' ')))) > 1:
-            classNames[className] = classNames.get(className, 0) + 1
-            
+    # prevent from running forever but keep the most important stuff
+    if len(buttons["login"]) > 40:
+        buttons["login"] = buttons["login"][:40]
 
-    buttons = {"login": [], "account": [], "password": [], "recaptcha": [],
-               "oauth": [], "submit": []}  # TODO: recaptcha oauth submit
+    for el in buttons["login"]:
+        if stopFlag:
+            raise selenium.common.exceptions.TimeoutException
+        el.___score = judge(el)
+
+    buttons["login"] = list(filter(lambda el: el.___score >= 0, buttons["login"]))
+
+    buttons["login"].sort(key=lambda el: el.___score, reverse=True)
+
+    if DEBUG:
+        driver.execute_script(
+            "debugButtons = arguments[0]; enableNextFunc(debugButtons);", buttons
+        )
 
     newSamples = []
     for sample in samples:
         if stopFlag:
             raise selenium.common.exceptions.TimeoutException
+
         el = sample[0]
-        features = sample[1]
-
-        if features["oauth"] > 0:
-            buttons["oauth"].append(el)
-            continue
-
-        if features["trash"] > 0:
-            continue
-
-        if classNames.get(features["className"], 0) > 3:
-            continue
-
         if isStale(el):
             continue
-
-        features["visible"] = userSeeable(el)
-        features["changeable"] = userChangeable(el)
+        sample[1]["visible"] = userSeeable(el)
+        sample[1]["changeable"] = userChangeable(el)
         url = el.get_attribute("href") or el.get_attribute("src")
-        features["hasLink"] = False
-        if url is not None and not url.startswith("javascript:") and currUrl.split("#")[0] != url.split("#")[0]:
-            features["hasLink"] = True
-        features["isSameDomain"] = False
-        if features["hasLink"] and isSameDomain(currUrl, url):
-            features["isSameDomain"] = True
+        sample[1]["isSameDomain"] = False
+        if url is not None:
+            if not url.startswith("javascript:") and currUrl.split("#")[0] != url.split("#")[0] and isSameDomain(currUrl, url):
+                sample[1]["isSameDomain"] = True
         newSamples.append(sample)
-    samples = newSamples
 
-    hasLogin = False
-
-    for sample in samples:
-        el = sample[0]
-        features = sample[1]
-        if features["emailPasswordSelected"]:      
-            # entering here means that the element *must* be a text input, so it
-            # can in no case be a login button unless the website creator is crazy
-            if features["visible"] and features["changeable"] and features["signup"] == 0:
-                # if features["password"] == 0:  # the account keywords is too general, a password input may contain them
-                el.___wantsEmail = features["email"] > 0
-
-                if features["account"] + features["login"] > 0:
-                    hasLogin = True
-
-                if features['type'].strip().lower() == 'password':
-                    buttons["password"].append([el, scorePassword(features)])
-                else:
-                    buttons["account"].append([el, scoreAccount(features)])
-
-            if features["password"] > 0:
-                hasLogin = True
-
-        elif features["login"] > 0 or features["account"] > 0 or features['email'] > 0:
-            buttons["login"].append([el, scoreLogin(features)])
-
-    for g in ["login", "account", "password"]:
-        buttons[g].sort(key=lambda x: x[1], reverse=True)
-        buttons[g] = [button[0] for button in buttons[g] if button[1] > 0]
-
-    if not hasLogin:
-        buttons["account"] = []
-
-    if DEBUG:
-        driver.execute_script("debugButtons = arguments[0]; enableNextFunc(debugButtons);", buttons)
-
-    return buttons
+    return buttons, newSamples, dfsSeq
 
 
 def toLoginPage(driver, btns, status):
@@ -324,7 +319,7 @@ def toLoginPage(driver, btns, status):
         else:
             try:
                 i.click()
-            except Exception as e:
+            except:
                 continue
         status["buttonClicked"].append(btnHTML)
         status["visitedEls"].append(elHash)
@@ -342,7 +337,7 @@ def toLoginPage(driver, btns, status):
             # as we have entered a new page, current frame should get reset
             status["currentFrames"] = []
             rtn = "newPage"
-        return rtn
+        return rtn, i
 
 
 # Example: https://sbu.ac.ir/
@@ -365,9 +360,10 @@ def checkHttpAuth(driver, status={}):
                         "digest",
                         "ntlm",
                         "negotiate",
+                        "spdyproxy",
+                        "mock",
                     ]:
-                        ip = message["params"]["response"].get('remoteIPAddress')
-                        viaArr = [ip]
+                        viaArr = []
                         via = caseInsensitiveGet(headers, "via")
                         if via:
                             viaArr.append(via)
@@ -438,19 +434,16 @@ def getAccountServerURL(driver, skeletonEmailUsed=False):
                     requestsOfInterest[requestId] = {
                         "description": [description],
                         "url": [url],
-                        "serverKnowledge": [],
+                        "via": [],
                     }
 
         elif message["method"] == "Network.responseReceived":
             requestId = message["params"]["requestId"]
             if strHasArrEl(requestId, requestsOfInterestIds):
-                ip = message["params"]["response"].get('remoteIPAddress')
-                requestsOfInterest[requestId]["serverKnowledge"].append(ip)
-
                 headers = message["params"]["response"]["headers"]
                 via = caseInsensitiveGet(headers, "via")
                 if via:
-                    requestsOfInterest[requestId]["serverKnowledge"].append(via)
+                    requestsOfInterest[requestId]["via"].append(via)
 
     requestUrls = []
 
@@ -458,13 +451,43 @@ def getAccountServerURL(driver, skeletonEmailUsed=False):
         request = requestsOfInterest[i]
         for idx, val in enumerate(request["description"]):
             requestUrls.append(
-                [request["description"][idx], request["url"][idx], request["serverKnowledge"]]
+                [request["description"][idx], request["url"][idx], request["via"]]
             )
 
     return requestUrls
 
 
-def processFrame(driver, status, wait=True):
+def extendList(samples, items):
+    temp = []
+    for item in items:
+        flag = False
+        for sample in samples:
+            if sample[0] == item[0]:
+                flag = True
+                break
+        if not flag:
+            temp.append(item)
+    samples.extend(temp)
+    return samples
+
+
+def labelSamples(samples, dfsSeq, button, label):
+    items = []
+    buttonID = -1
+    for item in samples:
+        if item[0] == button:
+            buttonID = str(item[4])
+            break
+    L, R = dfsSeq[buttonID]
+    for item in samples:
+        l, r = dfsSeq[str(item[4])]
+        if L <= l and r <= R:
+            item[2] = label
+            items.append(item)
+    return items
+
+
+def processFrame(driver, status, samples, wait=True):
     log("Processing frame, current depth = %d" % status["depth"])
 
     httpAuth = checkHttpAuth(driver, status)
@@ -483,7 +506,7 @@ def processFrame(driver, status, wait=True):
 
     switchToAutoFocusedInputElementFrame(driver, status)
 
-    buttons = detectButtons(driver)
+    buttons, newSamples, dfsSeq = detectButtons(driver)
 
     status["recaptchaCount"] += len(buttons["recaptcha"])
     status["loginCount"] += len(buttons["login"])
@@ -506,6 +529,9 @@ def processFrame(driver, status, wait=True):
             status["twoStepLogin"] = True
 
             accountInput = buttons["account"][0]
+            labelledSamples = labelSamples(newSamples, dfsSeq, accountInput, "account")
+            if labelledSamples:
+                extendList(samples, labelledSamples)
 
             account = SKELETONEMAIL
             if not accountInput.___wantsEmail:
@@ -515,14 +541,12 @@ def processFrame(driver, status, wait=True):
                 time.sleep(0.3)
             except:
                 pass
-            sendKeys(driver, accountInput, account)
-            # accountInput.send_keys(account)
+            accountInput.send_keys(account)
             time.sleep(0.2)
-            sendKeys(driver, accountInput, webdriver.common.keys.Keys.ENTER)
-            # accountInput.send_keys(webdriver.common.keys.Keys.ENTER)
+            accountInput.send_keys(webdriver.common.keys.Keys.ENTER)
 
             time.sleep(5)
-            buttons = detectButtons(driver)
+            buttons, newSamples, dfsSeq = detectButtons(driver)
             buttons["account"] = []
 
         status["passwordCount"] = len(buttons["password"])
@@ -537,10 +561,9 @@ def processFrame(driver, status, wait=True):
                     time.sleep(0.3)
                 except:
                     pass
-
-                sendKeys(driver, i, account + webdriver.common.keys.Keys.TAB)
-                # i.send_keys(account)
-                # i.send_keys(webdriver.common.keys.Keys.TAB)
+                i.send_keys(account)
+                i.send_keys(webdriver.common.keys.Keys.TAB)
+                labelSamples(newSamples, dfsSeq, i, "account")
 
         for i in buttons["password"]:
             if userChangeable(i):
@@ -549,11 +572,10 @@ def processFrame(driver, status, wait=True):
                     time.sleep(0.3)
                 except:
                     pass
-
-                sendKeys(driver, i, PASSWORD)
-                # i.send_keys(PASSWORD)
+                i.send_keys(PASSWORD)
                 # i.send_keys(webdriver.common.keys.Keys.TAB)
                 status["passwordEntered"] = True
+                labelSamples(newSamples, dfsSeq, i, "password")
 
         if buttons["password"]:
             sendEnterKeyList = buttons["password"]
@@ -564,11 +586,11 @@ def processFrame(driver, status, wait=True):
             driver.execute_script("arguments[0].click();", i)
 
         time.sleep(0.2)
+        extendList(samples, newSamples)
 
         for i in sendEnterKeyList:
             if userChangeable(i):
-                sendKeys(driver, i, webdriver.common.keys.Keys.ENTER)
-                # i.send_keys(webdriver.common.keys.Keys.ENTER)
+                i.send_keys(webdriver.common.keys.Keys.ENTER)
                 time.sleep(3)
                 urls = getAccountServerURL(driver, skeletonEmailUsed)
                 if urls:
@@ -600,9 +622,12 @@ def processFrame(driver, status, wait=True):
         if urls:
             return urls
 
-    nextPageType = toLoginPage(driver, buttons["login"], status)
-    if nextPageType is None:
+    ret = toLoginPage(driver, buttons["login"], status)
+    if ret is None:
         return
+    [nextPageType, clickedButton] = ret
+    labelSamples(newSamples, dfsSeq, clickedButton, "login")
+    extendList(samples, newSamples)
 
     # nothing found. Let's continue
     # iframe switch should not consume depth
@@ -618,7 +643,7 @@ def processFrame(driver, status, wait=True):
 
         log("Going to a login page")
         status["depth"] -= 1
-        return processFrame(driver, status, waitNeeded)
+        return processFrame(driver, status, samples, waitNeeded)
 
 
 def processPage(driver, url):
@@ -628,13 +653,10 @@ def processPage(driver, url):
     url = normalizeURL(url)
 
     driver.get(url)
-    if not DEBUG:
-        time.sleep(10)
-        driver.refresh()
 
     urls = []
 
-    initialDepth = 3
+    initialDepth = 2
 
     status = {
         "accountCount": 0,
@@ -654,7 +676,9 @@ def processPage(driver, url):
 
     samples = []
 
-    urls = processFrame(driver, status)
+    urls = processFrame(driver, status, samples)
+
+    samples = [[sample[3], sample[1], sample[2]] for sample in samples]
 
     statusArr = [
         status["accountCount"],
@@ -675,7 +699,7 @@ def processPage(driver, url):
     else:
         log("Failed to detect login link. Exiting...")
 
-    return (urls, statusArr)
+    return (urls, statusArr, samples)
 
 
 def Stop():
@@ -690,7 +714,6 @@ def crawlSingle(url):
     driver = create_driver()
     timer = threading.Timer(240, Stop)
     timer.start()
-    # result = processPage(driver, url)
     try:
         result = processPage(driver, url)
     except selenium.common.exceptions.TimeoutException:
@@ -704,18 +727,96 @@ def crawlSingle(url):
     timer.cancel()
     driver.quit()
 
-    return [url, result[0], result[1]]
+    return [url, result[0], result[1], result[2]]
 
 
 if __name__ == "__main__":
     DEBUG = True
-    # url = "pbase.com"
-    url = "www.unimarconi.it"
+    # driver = create_driver()
+    url = "app.netlify.com"
+    # driver.get('http://github.com')
     # rtn = getSelectedElement(driver)
-    driver = create_driver()
-    while True:
-        result = processPage(driver, url)
-    # result = crawlSingle(url)
-    # print(json.dumps(result))
+    # while True:
+    # result = processPage(driver, url)
+    result = crawlSingle(url)
+    print(json.dumps(result))
     # for x in result[3]:
     #     print(x)
+
+# log = list(filter(lambda x: x['method'] == 'Network.requestWillBeSent', map(lambda x: json.loads(x['message'])['message'], driver.get_log('performance'))))
+# log = list(map(lambda x: json.loads(x['message'])['message'], driver.get_log('performance')))
+
+
+# TODO
+
+# do some random mouse movement for 1 second
+
+# [x] filter out ones that exist neither at the top nor at the bottom of the page
+
+# [x] put judge function in js as i've now written isAtFront
+
+# sogo: does not support phone login
+
+# csdn: things are not working out after translation. the slash is gone, but
+# signup has caps
+
+# www.trustpilot.com facebook is a iframe button
+
+# onlick especially ga push should be an indicator??
+
+# job assigner -- log exiting job status
+
+# fandom.com: rigrecaptcha not working
+
+# okta.com not working: don't know your company url? should be signup
+
+# [x] imgur search bar contains @user fixed: trash offset is now the same as
+# visiable text offset (-99 vs 99) so it's now trash
+
+# [x] apple.com pressing enter too fast will lead to failure in loading
+
+# [x] khanacademy not working: login-signup-root is not picked up by the current "/"
+# "or" rule (actually, it's caused by signup form detection scheme) potential
+# fix: ensure that the form must contain its inputs?
+
+# improve current signup detection: currently the multiplier is -99 and it is
+# only designed to detect natural language instead of programming text. Should I
+# change it to .99 if the category belongs to non spoken word? Also, the rule
+# itself is greatly diverged from the original design, so further moniter is
+# required
+
+# [x] does switchToFrame work for nested frames?? fix: keep track of the frame
+# sequence
+
+# [x] **distinguish username from email** (chase.com, livejasmin.com, quizlet.com),
+# email in cookie (actually not the cause), khanacademy not working (fixed)
+
+# [x] headless mode cannot use extension, but the evasion script can handle v2
+# invisiable, and v3 recaptcha maybe just use Fetch.enable instead? it should
+# also work for content script as well
+
+# [x] vimeo javascript issue caused by string.test. how to isolate the
+# environment? (basically how to create an extension....)
+
+# [x] washingtonpost.com sign in button contains in a sign up form
+
+# [x] cnbc.com there's an iframe within an iframe with almost no hint of the
+# signin at the iframe element. must use context instead -- fixed by identifying
+# pre-focused element
+
+# [x] https://www.cnet.com/ context required. the login button only shows "use
+# email"
+
+# [x] vimeo registeration forms contains login box
+
+# [x] imdb create a new account has signin and signup keywords - fixed by
+# changing signup to a trash keyword but ignoring "or" "/" keywords that might
+# lead to two responses
+
+# [x] ups.com cannot detect login button since it's inside a signup form. fix:
+# separate login button detection from normal form detection
+
+# currently evasion, recaptcha is not running on newly opened page as selenium
+# cannot attach cdp event listener
+
+# wontfix: washingtonpost.com does not have testaccount@something
